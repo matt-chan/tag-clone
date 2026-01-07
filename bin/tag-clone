@@ -1,0 +1,175 @@
+#!/bin/bash
+#
+# tag-clone
+# Copies macOS file tags from JPG files to their corresponding ARW files
+#
+
+set -e
+
+VERSION="1.0.0"
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS] <directory>
+
+Copies macOS file tags from JPG files to their corresponding ARW files.
+For each image pair (e.g., IMG_001.jpg and IMG_001.arw), tags from the
+JPG file are copied to the ARW file.
+
+Options:
+    -h, --help      Show this help message
+    -v, --version   Show version information
+    -d, --dry-run   Show what would be done without making changes
+    -r, --recursive Process directories recursively
+    -q, --quiet     Suppress non-error output
+
+Examples:
+    $(basename "$0") /path/to/photos
+    $(basename "$0") --dry-run ~/Pictures
+    $(basename "$0") -r /Volumes/Photos
+
+EOF
+}
+
+version() {
+    echo "tag-clone version $VERSION"
+}
+
+# Check if tag utility is available
+check_dependencies() {
+    if ! command -v tag &> /dev/null; then
+        echo "Error: 'tag' utility not found." >&2
+        echo "Install it with: brew install tag" >&2
+        exit 1
+    fi
+}
+
+# Initialize options
+DRY_RUN=false
+RECURSIVE=false
+QUIET=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -v|--version)
+            version
+            exit 0
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -r|--recursive)
+            RECURSIVE=true
+            shift
+            ;;
+        -q|--quiet)
+            QUIET=true
+            shift
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            DIRECTORY="$1"
+            shift
+            ;;
+    esac
+done
+
+# Validate directory argument
+if [[ -z "$DIRECTORY" ]]; then
+    echo "Error: No directory specified." >&2
+    usage
+    exit 1
+fi
+
+if [[ ! -d "$DIRECTORY" ]]; then
+    echo "Error: '$DIRECTORY' is not a valid directory." >&2
+    exit 1
+fi
+
+check_dependencies
+
+# Counters
+processed=0
+skipped=0
+errors=0
+
+log() {
+    if [[ "$QUIET" != true ]]; then
+        echo "$@"
+    fi
+}
+
+# Find JPG files
+if [[ "$RECURSIVE" == true ]]; then
+    find_cmd=(find "$DIRECTORY" -type f \( -iname "*.jpg" -o -iname "*.jpeg" \))
+else
+    find_cmd=(find "$DIRECTORY" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" \))
+fi
+
+while IFS= read -r -d '' jpg_file; do
+    # Get the directory and base name without extension
+    dir=$(dirname "$jpg_file")
+    basename=$(basename "$jpg_file")
+    name_without_ext="${basename%.*}"
+    
+    # Look for corresponding ARW file (case-insensitive)
+    arw_file=""
+    for ext in arw ARW Arw; do
+        potential_arw="$dir/$name_without_ext.$ext"
+        if [[ -f "$potential_arw" ]]; then
+            arw_file="$potential_arw"
+            break
+        fi
+    done
+    
+    if [[ -z "$arw_file" ]]; then
+        log "Skipping: No ARW file found for $jpg_file"
+        ((skipped++))
+        continue
+    fi
+    
+    # Get tags from JPG file
+    tags=$(tag --list --no-name "$jpg_file" 2>/dev/null || true)
+    
+    if [[ -z "$tags" ]]; then
+        log "Skipping: No tags on $jpg_file"
+        ((skipped++))
+        continue
+    fi
+    
+    if [[ "$DRY_RUN" == true ]]; then
+        log "[DRY RUN] Would copy tags '$tags' from $jpg_file to $arw_file"
+        ((processed++))
+    else
+        if tag --add "$tags" "$arw_file" 2>/dev/null; then
+            log "Copied tags '$tags' from $basename to ${name_without_ext}.arw"
+            ((processed++))
+        else
+            echo "Error: Failed to set tags on $arw_file" >&2
+            ((errors++))
+        fi
+    fi
+done < <("${find_cmd[@]}" -print0)
+
+# Summary
+log ""
+log "Summary:"
+log "  Processed: $processed"
+log "  Skipped:   $skipped"
+log "  Errors:    $errors"
+
+if [[ $errors -gt 0 ]]; then
+    exit 1
+fi
+
+exit 0
